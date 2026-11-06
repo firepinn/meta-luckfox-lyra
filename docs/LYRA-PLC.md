@@ -103,7 +103,7 @@ is at a bus end; check with a meter (≈120 Ω across the pair, power off).
   ends up in a reboot loop.
 - Flash without root on the host: stop U-Boot, `dhcp`, and let it pull the
   image's mapped chunks over TFTP and `mmc write` them
-  (`refs/tools/uboot-flash.py`, server `refs/tools/tftpd.py` in Docker on
+  (`scripts/uboot-flash.py`, server `scripts/tftpd.py` in Docker on
   udp/69; firewalld blocks port 69 for a host process).
 
 ## Updates: RAUC A/B

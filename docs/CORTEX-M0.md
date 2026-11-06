@@ -1,6 +1,6 @@
 # RK3506 Cortex-M0 sidecar — mechanism notes
 
-Researched from https://github.com/nvitya/rk3506-mcu (pinned in `refs/rk3506-mcu`)
+Researched from https://github.com/nvitya/rk3506-mcu (pinned by the rk3506-rproc recipe)
 and cross-checked against our own kernel tree: what it takes to run a
 real-time bus driver on the M0.
 
