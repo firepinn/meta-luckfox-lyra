@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run a command on the Lyra Pi over the serial console and print its output.
-# Auto-logs in (root/root) if the console is sitting at a login prompt.
+# Auto-logs in as root if the console is sitting at a login prompt, which
+# needs the empty-root-password image feature (see README "Logging in").
 #   ./sercmd.sh 'ip -br link' [timeout_secs]
 PORT=${PORT:-/dev/ttyUSB0}
 CMD=$1
@@ -16,7 +17,7 @@ printf '\r\n' > "$PORT"
 sleep 1.5
 if grep -qi "login:" "$TMP"; then
     printf 'root\r\n' > "$PORT"; sleep 2.5
-    printf 'root\r\n' > "$PORT"; sleep 3.5
+    printf '\r\n' > "$PORT"; sleep 3.5
 fi
 
 : > "$TMP.mark"

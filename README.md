@@ -1,7 +1,7 @@
 # meta-luckfox-lyra
 
 Yocto BSP layer for the **Luckfox Lyra Pi** (Rockchip RK3506B). Builds a
-bootable image with OpenSSH and `root`/`root`, both Ethernet ports on DHCP,
+bootable image with OpenSSH, both Ethernet ports on DHCP,
 driver coverage for the on-board peripherals, and a working Cortex-M0 sidecar.
 
 Self-contained: the layer pins its own dependencies and carries its own build
@@ -84,17 +84,19 @@ directory by the `rkbin` recipe.
 * **Serial:** UART0 on the 40-pin header, **115200 8N1**, device `ttyS0`. The
   Lyra DTS leaves Rockchip's fiq-debugger disabled, so this is a plain 8250
   port and *not* `ttyFIQ0`.
-* **SSH:** `ssh root@<ip>`, password `root`.
+* **SSH:** `ssh root@<ip>` with a key: set
+  `LUCKFOX_ROOT_AUTHORIZED_KEYS = "/path/to/key.pub"` in `conf/local.conf`.
 
-`PermitRootLogin yes` comes from the `allow-root-login` image feature —
-OpenSSH defaults to `prohibit-password`, which would refuse a password login
-for root. The password is a precomputed sha512-crypt hash rather than
-`extrausers`' `usermod -P`, because in current shadow `-P` is `--prefix` and
-would silently set the wrong thing. `debug-tweaks` is deliberately **not**
-enabled, since it implies `empty-root-password`.
+Root login follows the Yocto defaults: root has no password, so neither the
+console nor ssh accepts a password for it, and OpenSSH lets root in with a key
+only. For a bench board, Yocto's development features open it up:
 
-> Password root login is wide open by design here. Change it before putting the
-> board on an untrusted network.
+```
+EXTRA_IMAGE_FEATURES += "allow-empty-password empty-root-password allow-root-login"
+```
+
+(root with an empty password on the console and over ssh -- never on an
+untrusted network).
 
 ## How much is mainline?
 

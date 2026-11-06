@@ -1,5 +1,5 @@
-# Luckfox Lyra Pi image: serial console, dual Ethernet with DHCP, OpenSSH
-# with root/root, and userspace tools for every on-board peripheral.
+# Luckfox Lyra Pi image: serial console, dual Ethernet with DHCP, OpenSSH,
+# and userspace tools for every on-board peripheral.
 
 SUMMARY = "Luckfox Lyra Pi Linux image"
 DESCRIPTION = "Bootable image for the Luckfox Lyra Pi (RK3506B). Boots from \
@@ -32,13 +32,12 @@ IMAGE_INSTALL = " \
     tzdata \
 "
 
-# ssh-server-openssh pulls in OpenSSH (not dropbear); allow-root-login rewrites
-# sshd_config's PermitRootLogin, which otherwise defaults to prohibit-password
-# and would reject password logins for root.
-#
-# Deliberately NOT using debug-tweaks: it implies empty-root-password, which
-# would blank the root password we set below.
-IMAGE_FEATURES += "ssh-server-openssh allow-root-login"
+# ssh-server-openssh pulls in OpenSSH (not dropbear). Root login follows the
+# Yocto defaults: no root password, and OpenSSH lets root in with a key only
+# (see LUCKFOX_ROOT_AUTHORIZED_KEYS below). For a development board, enable
+# Yocto's own features in local.conf instead, e.g.
+#   EXTRA_IMAGE_FEATURES += "allow-empty-password empty-root-password allow-root-login"
+IMAGE_FEATURES += "ssh-server-openssh"
 
 IMAGE_LINGUAS = "en-us"
 
@@ -47,31 +46,6 @@ IMAGE_LINGUAS = "en-us"
 # IMAGE_ROOTFS_EXTRA_SPACE here would only pad the image with zeroes and make
 # flashing slower for no benefit.
 IMAGE_ROOTFS_EXTRA_SPACE = "65536"
-
-# --- root password -----------------------------------------------------------
-# Set as a precomputed sha512-crypt hash of "root" rather than through
-# extrausers' `usermod -P`: in current shadow, -P is --prefix, so passing a
-# cleartext password there can silently set the wrong thing. Writing the hash
-# directly is unambiguous.
-#
-# Reproduce with: openssl passwd -6 -salt lyrapiA0 root
-#
-# $rootpw is single-quoted so the shell does not expand the $6$ field, and is
-# referenced without braces so bitbake does not treat it as a variable.
-set_root_password() {
-    rootpw='$6$lyrapiA0$Yy669CHRWRsYl4O8Kv7CpcX1jbUXOWNi.uH4hbHIDr0IE4L8gtbxjX/Ow7c/swwZdbX4RqJqFeu.oyzyURU/a/'
-
-    if [ ! -e ${IMAGE_ROOTFS}${sysconfdir}/shadow ]; then
-        bbfatal "no /etc/shadow in the rootfs — cannot set the root password"
-    fi
-
-    # '|' is safe as the sed delimiter: sha512-crypt output is [./0-9A-Za-z] only.
-    sed -i "s|^root:[^:]*:|root:$rootpw:|" ${IMAGE_ROOTFS}${sysconfdir}/shadow
-
-    if ! grep -q '^root:\$6\$' ${IMAGE_ROOTFS}${sysconfdir}/shadow; then
-        bbfatal "failed to set the root password hash in /etc/shadow"
-    fi
-}
 
 # --- networking --------------------------------------------------------------
 # Both RMII GMACs get predictable names (end0/end1) under systemd. A single
@@ -261,7 +235,7 @@ EOFWPA2
 
 # --- root SSH key ---------------------------------------------------------------
 # Optional: point this at a public key file in conf/local.conf to log in as
-# root without the password, e.g.
+# root over ssh, e.g.
 #   LUCKFOX_ROOT_AUTHORIZED_KEYS = "/home/me/.ssh/id_ed25519.pub"
 LUCKFOX_ROOT_AUTHORIZED_KEYS ?= ""
 
@@ -275,7 +249,7 @@ install_root_authorized_keys() {
 # Rebuild the rootfs when the key file changes.
 do_rootfs[file-checksums] += "${@'%s:True' % d.getVar('LUCKFOX_ROOT_AUTHORIZED_KEYS') if d.getVar('LUCKFOX_ROOT_AUTHORIZED_KEYS') else ''}"
 
-ROOTFS_POSTPROCESS_COMMAND += "set_root_password; configure_networkd; configure_wireless; install_growfs; install_root_authorized_keys; "
+ROOTFS_POSTPROCESS_COMMAND += "configure_networkd; configure_wireless; install_growfs; install_root_authorized_keys; "
 
 # --- SSH host keys on /data ---------------------------------------------------
 # /etc belongs to the image: each RAUC slot (PLC) or each reflash (Lyra Pi) got
