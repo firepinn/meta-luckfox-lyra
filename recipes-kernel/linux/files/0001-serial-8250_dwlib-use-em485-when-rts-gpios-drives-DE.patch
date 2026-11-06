@@ -1,0 +1,33 @@
+From: Lyra PLC BSP <bsp@localhost>
+Subject: [PATCH] serial: 8250_dwlib: use em485 when rts-gpios drives DE
+
+The Rockchip UART has a hardware RS-485 engine that drives its own RTS/DE
+pin. On boards where the transceiver DE is wired to a plain GPIO instead
+(Luckfox Lyra PLC: UART2 has no RTS function on any RM_IO pin), that engine
+toggles nothing. When the port has rts-gpios, fall back to the generic em485
+implementation, which drives RTS -- and so the GPIO via mctrl_gpio.
+
+Upstream-Status: Inappropriate [vendor kernel; mainline has no RK hw RS-485 path]
+---
+diff --git a/drivers/tty/serial/8250/8250_dwlib.c b/drivers/tty/serial/8250/8250_dwlib.c
+index cb10e4b9f47f..c800e6c849d7 100644
+--- a/drivers/tty/serial/8250/8250_dwlib.c
++++ b/drivers/tty/serial/8250/8250_dwlib.c
+@@ -285,7 +285,16 @@ void dw8250_setup_port(struct uart_port *p)
+ 	struct uart_8250_port *up = up_to_u8250p(p);
+ 	u32 reg, old_dlf;
+ 
+-	pd->hw_rs485_support = dw8250_detect_rs485_hw(p);
++	/*
++	 * A board that drives its transceiver's DE from a GPIO (rts-gpios) has
++	 * not wired the UART's own RTS/DE pin, so the hardware RS-485 engine
++	 * would toggle nothing. Use the generic em485 path, which drives RTS --
++	 * and so the GPIO, through mctrl_gpio -- around each transmission.
++	 */
++	if (device_property_present(p->dev, "rts-gpios"))
++		pd->hw_rs485_support = false;
++	else
++		pd->hw_rs485_support = dw8250_detect_rs485_hw(p);
+ 	if (pd->hw_rs485_support) {
+ 		p->rs485_config = dw8250_rs485_config;
+ 		up->lsr_save_mask = LSR_SAVE_FLAGS | DW_UART_LSR_ADDR_RCVD;

@@ -1,0 +1,28 @@
+# Lyra PLC 1.9" 170x320 IPS LCD, ST7789V. Compiled by mipi-dbi-cmd.py into
+# /lib/firmware/luckfox,lyra-plc-lcd.bin for the panel-mipi-dbi driver, which
+# sends this after a hardware reset whenever the display is enabled.
+#
+# Values recovered from Luckfox's own driver: init_display(), set_var() and
+# set_gamma() of fb_st7789v in the 6.1.99 kernel shipped on the board
+# (Luckfox_Lyra_PLC Debian image, built 2026-07-28), disassembled because
+# Luckfox has not published that kernel's source. The same driver's
+# set_addr_win() adds 35 to the column address and nothing to the row; that
+# offset lives in the device tree (hback-porch = 35), not here.
+
+command 0x11                                    # SLPOUT
+sleep 120
+command 0x3a 0x05                               # COLMOD: 16 bpp RGB565
+command 0xb2 0x05 0x05 0x00 0x33 0x33           # PORCTRL
+command 0xb7 0x75                               # GCTRL: VGH/VGL
+command 0xc2 0x01 0xff                          # VDVVRHEN
+command 0xc3 0x13                               # VRHS
+command 0xc4 0x20                               # VDVS
+command 0xbb 0x22                               # VCOMS
+command 0xc5 0x20                               # VCMOFSET
+command 0xd0 0xa4 0xa1                          # PWCTRL1
+command 0x36 0x00                               # MADCTL: rotate 0, RGB
+command 0xe0 0xd0 0x05 0x0a 0x09 0x08 0x05 0x2e 0x44 0x45 0x0f 0x17 0x16 0x2b 0x33  # PVGAMCTRL
+command 0xe1 0xd0 0x05 0x0a 0x09 0x08 0x05 0x2e 0x43 0x45 0x0f 0x16 0x16 0x2b 0x33  # NVGAMCTRL
+command 0x21                                    # INVON: IPS glass
+command 0x29                                    # DISPON
+sleep 20

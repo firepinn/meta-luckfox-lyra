@@ -1,0 +1,18 @@
+[Unit]
+Description=Lyra PLC LCD clock (LVGL)
+# No dev-fb0.device dependency: udev does not tag framebuffer nodes for
+# systemd, so that unit never appears and would stall multi-user.target.
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+# panel-mipi-dbi probes asynchronously after modules-load; wait for fb0.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do [ -e /dev/fb0 ] && exit 0; sleep 0.2; done; exit 1'
+# Hand the LCD over from the kernel text console to the app.
+ExecStartPre=-/bin/sh -c 'for v in /sys/class/vtconsole/vtcon*; do grep -q "frame buffer" $v/name && echo 0 > $v/bind; done'
+ExecStart=/usr/bin/lyra-plc-clock
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

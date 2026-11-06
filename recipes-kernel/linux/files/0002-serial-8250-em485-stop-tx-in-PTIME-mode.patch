@@ -1,0 +1,36 @@
+From: Lyra PLC BSP <bsp@localhost>
+Subject: [PATCH] serial: 8250: em485: detect TX FIFO empty in PTIME mode
+
+With programmable THRE interrupt mode (IER.PTIME, set by the Rockchip 8250
+code) LSR.THRE means "TX FIFO full", so __stop_tx() never deasserted RS-485
+RTS (RK3506: IER=0x82, LSR=0x40 after a send) and the port stalled after
+the first write. In that mode read the DesignWare USR.TFE bit instead.
+
+Upstream-Status: Inappropriate [vendor kernel PTIME handling]
+---
+--- a/drivers/tty/serial/8250/8250_port.c
++++ b/drivers/tty/serial/8250/8250_port.c
+@@ -1495,8 +1495,22 @@
+ 	if (em485) {
+ 		u16 lsr = serial_lsr_in(p);
+ 		u64 stop_delay = 0;
++		bool fifo_empty = lsr & UART_LSR_THRE;
+ 
+-		if (!(lsr & UART_LSR_THRE))
++		/*
++		 * In programmable THRE interrupt mode (IER.PTIME, which the
++		 * Rockchip 8250 setup enables) LSR.THRE reports "TX FIFO full",
++		 * not "empty", so the check above never passed and RS-485 RTS
++		 * stayed asserted forever. The THRE interrupt fires once, as
++		 * the FIFO drains, while the last frame is still shifting out,
++		 * so waiting for TEMT here would miss it for good. Ask the
++		 * DesignWare UART directly: USR.TFE is "TX FIFO empty". The
++		 * UART_CAP_NOTEMT path below then covers the final frame.
++		 */
++		if (p->ier & UART_IER_PTIME)
++			fifo_empty = serial_in(p, 0x1f /* DW_UART_USR */) & 0x04 /* TFE */;
++
++		if (!fifo_empty)
+ 			return;
+ 		/*
+ 		 * To provide required timing and allow FIFO transfer,

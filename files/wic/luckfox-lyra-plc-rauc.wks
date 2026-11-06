@@ -1,0 +1,17 @@
+# Lyra PLC eMMC layout with RAUC A/B rootfs slots.
+#
+#   32 KiB  : u-boot-rockchip.bin (raw)
+#   14 MiB  : U-Boot environment + redundant copy (128 KiB each, raw)
+#   p1 16 MiB: boot    vfat  32 MiB  boot.scr only (the bootchooser)
+#   p2       : rootfs_a ext4 1.5 GiB slot A (kernel + dtb in /boot)
+#   p3       : rootfs_b ext4 1.5 GiB slot B (empty until the first update)
+#   p4       : data    ext4  rest    persistent data, RAUC data dir; grown on first boot
+
+part --source rawcopy --sourceparams="file=u-boot-rockchip.bin" --no-table --align 32
+
+part /boot --source bootimg-partition --fstype=vfat --label boot --align 16384 --size 32 --active
+part / --source rootfs --fstype=ext4 --label rootfs_a --align 4096 --fixed-size 1536M
+part --fstype=ext4 --label rootfs_b --align 4096 --fixed-size 1536M
+part --fstype=ext4 --label data --align 4096 --size 128M
+
+bootloader --ptable msdos

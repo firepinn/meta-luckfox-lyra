@@ -1,0 +1,330 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
+ */
+
+/dts-v1/;
+
+
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/display/drm_mipi_dsi.h>
+#include <dt-bindings/display/rockchip_vop.h>
+#include <dt-bindings/input/rk-input.h>
+#include <dt-bindings/sensor-dev.h>
+#include <dt-bindings/suspend/rockchip-rk3506.h>
+#include "rk3506.dtsi"
+
+/ {
+	/*
+	 * adc-keys needs at least one child key; without one the driver returns
+	 * -EINVAL ("probe of adc-keys failed with error -22").
+	 *
+	 * Channel 1 is the RECOVER button (net SARADC_IN1_RECOVER), which pulls the
+	 * input to ground when pressed, so its press threshold is 0 V.
+	 *
+	 * keyup-threshold is lowered from the vendor's 1800 mV because it must sit
+	 * BELOW the idle reading, not at it: measured on this board, channel 1 idles
+	 * at raw 1020 x 1.7578 mV = ~1793 mV. Against a 1800 mV keyup threshold the
+	 * driver sees 1793 < 1800, concludes a key is down and latches a phantom
+	 * press. 1700 mV leaves headroom while staying far above a real press.
+	 */
+	adc_keys: adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&saradc 1>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1700000>;
+		poll-interval = <100>;
+
+		button-recovery {
+			label = "recovery";
+			linux,code = <KEY_VENDOR>;
+			press-threshold-microvolt = <0>;
+		};
+	};
+
+	fiq_debugger: fiq-debugger {
+		compatible = "rockchip,fiq-debugger";
+		rockchip,serial-id = <0>;
+		rockchip,wake-irq = <0>;
+		rockchip,irq-mode-enable = <1>;
+		rockchip,baudrate = <1500000>;	/* Only 115200 and 1500000 */
+		interrupts = <GIC_SPI 115 IRQ_TYPE_LEVEL_HIGH>;
+		status = "disabled";
+	};
+
+	leds: leds {
+		compatible = "gpio-leds";
+		work_led: work-led {
+			gpios = <&gpio1 RK_PA0 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+		};
+	};
+
+	vcc_sys: vcc-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+	};
+
+	vcc_3v3: vcc-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_3v3";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc_sys>;
+	};
+
+	vcc_1v8: vcc-1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_1v8";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&vcc_3v3>;
+	};
+
+	//1.8V
+	vcc_ddr: vcc-ddr {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_ddr";
+		regulator-always-on;
+		regulator-boot-on;
+		vin-supply = <&vcc_sys>;
+	};
+
+	vdd_0v9: vdd-0v9 {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_0v9";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <900000>;
+		regulator-max-microvolt = <900000>;
+		vin-supply = <&vcc_sys>;
+	};
+
+	/*
+	 * CPU rail.
+	 *
+	 * Two bugs fixed here versus the vendor dtsi:
+	 *
+	 * 1. vin-supply pointed at &vdd_cpu -- the node itself. That circular
+	 *    dependency meant the regulator never resolved, so cpufreq-dt failed
+	 *    with "cpu cpu0: failed to get cpu0 reg" / "failed to init cpufreq"
+	 *    and the CPU stayed pinned at whatever the bootloader left it (1.2 GHz).
+	 *    It is fed from vcc_sys.
+	 *
+	 * 2. It declared a 0.5-1.5 V *range* on a regulator-fixed, which reports a
+	 *    single voltage (the min, 0.5 V). No OPP accepts 0.5 V, so every
+	 *    dev_pm_opp voltage request would have been rejected.
+	 *
+	 * There is no adjustable CPU regulator on this board -- no PMIC and no PWM
+	 * regulator -- so true DVFS is not possible; the rail is static and only
+	 * the frequency scales. 900 mV is not a guess: cpu0_opp_table in
+	 * rk3502.dtsi gives every OPP a max of 1100 mV, with a min of 850 mV up to
+	 * 1512 MHz and 950 mV for 1608 MHz. The board boots stable at 1200 MHz,
+	 * whose OPP requires 900 mV, so the real rail is at least that. Declaring
+	 * 900 mV therefore satisfies every OPP from 600 MHz to 1512 MHz and
+	 * naturally excludes only the 1608 MHz point, which the table says needs
+	 * 950 mV. That keeps us inside vendor spec instead of overclocking onto an
+	 * unverified rail.
+	 */
+	/*
+	 * ---- ADDED BY meta-luckfox-lyra (not vendor) ----
+	 *
+	 * Cortex-M0 sidecar, driven by the out-of-tree rk3506_rproc remoteproc
+	 * driver (see recipes-kernel/rk3506-rproc). Rockchip ships no M0
+	 * remoteproc support, and rk3506.dtsi has no mcu node at all, so this
+	 * describes it here.
+	 *
+	 * reg is the SRAM window the firmware is loaded into. The driver maps
+	 * it as the M0's TCM at M0-address 0 via an ATF SMC, so firmware must
+	 * be linked at 0x00000000.
+	 *
+	 * 32 KiB at 0xFFF84000: upstream keeps that branch behind `#if 0` and
+	 * defaults to 16 KiB at 0xFFF88000, but this layer patches the 32 KiB
+	 * window on so firmware can grow past 16 KiB. The driver ioremaps
+	 * its own hardcoded values and does not read this reg, but keep them in
+	 * step so the DT is not lying about the hardware.
+	 *
+	 * Note: once the M0 is running this SRAM is no longer accessible from
+	 * the A7 side, so reloading firmware requires stopping the M0 first.
+	 */
+	mcu_rproc: mcu@fff84000 {
+		compatible = "rockchip,rk3506-mcu";
+		reg = <0xfff84000 0x8000>;
+		firmware-name = "rk3506-m0.elf";
+		/*
+		 * Any peripheral the M0 drives must have its clocks and pins held
+		 * by this node, on the M0's behalf -- the same trick Rockchip's
+		 * rk3506-amp.dtsi uses for its remote core. A board or project that
+		 * gives the M0 a UART appends to this node: its clocks to clocks,
+		 * its pins to a "default" pinctrl. The driver calls
+		 * devm_clk_bulk_get_all(), so everything listed here is prepared and
+		 * enabled, and the platform core applies the "default" pinctrl on
+		 * probe without the driver having to ask.
+		 *
+		 * This is not optional bookkeeping: the CRU gates clocks nobody
+		 * claims, and an APB access from the M0 to an unclocked peripheral
+		 * stalls the bus and wedges that core with no diagnostic at all --
+		 * it presents as firmware that runs its first few instructions and
+		 * then stops. Enabling the UARTs as Linux ttyS devices would also
+		 * keep the clocks up, but then Linux owns peripherals it must never
+		 * touch.
+		 */
+		clocks = <&cru HCLK_M0>, <&cru STCLK_M0>,
+			 <&cru PCLK_MAILBOX>, <&cru PCLK_INTMUX>;
+		clock-names = "hclk_m0", "stclk_m0",
+			      "pclk_mailbox", "pclk_intmux";
+
+		/*
+		 * Mailbox 0 interrupt (GIC SPI 138), taken directly rather than
+		 * through Linux's mailbox driver.
+		 *
+		 * The M0 uses it to say "I have produced data", so the host does
+		 * not have to sweep the shared-memory rings on a timer. mailbox0
+		 * itself stays disabled: a mailbox client in Linux would claim the
+		 * block and its channels, and there is nothing here for the generic
+		 * framework to carry -- the payload is the ring, the mailbox is
+		 * only the doorbell. Holding PCLK_MAILBOX above is what keeps the
+		 * block alive without that driver.
+		 */
+		interrupts = <GIC_SPI 138 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "mbox";
+		/*
+		 * SRST_P_MAILBOX is here because nothing else deasserts it: the
+		 * mailbox node stays disabled, so Linux's mailbox driver -- which
+		 * would normally take the reset -- never probes. Clocked but held
+		 * in reset, the block accepts register writes and reads them back
+		 * happily while latching no status and raising no interrupt, which
+		 * is a memorably confusing way to fail.
+		 */
+		/*
+		 * INTMUX is how a peripheral interrupt reaches the M0 at all: the
+		 * NVIC has 32 lines, and lines 28-31 are fed by a 128-to-4 mux
+		 * whose sources are all masked at reset. It is also gated and
+		 * held in reset at power-on (pclk_intmux_en resets to 0), and an
+		 * APB write to it then disappears without a fault -- the mask
+		 * register simply reads back zero. Same failure as the mailbox
+		 * above, and the M0 needs both blocks alive to be interrupted by
+		 * anything.
+		 */
+		resets = <&cru SRST_H_M0>, <&cru SRST_M0_JTAG>,
+			 <&cru SRST_HRESETN_M0_AC>, <&cru SRST_P_MAILBOX>,
+			 <&cru SRST_P_INTMUX>;
+		reset-names = "h_m0", "m0_jtag", "hresetn_m0_ac", "p_mailbox",
+			      "p_intmux";
+		status = "okay";
+	};
+
+	vdd_cpu: vdd-cpu {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_cpu";
+		regulator-boot-on;
+		regulator-always-on;
+		regulator-min-microvolt = <900000>;
+		regulator-max-microvolt = <900000>;
+		vin-supply = <&vcc_sys>;
+	};
+};
+
+/**********cpu**********/
+&cpu0 {
+	cpu-supply = <&vdd_cpu>;
+	status = "okay";
+};
+
+/*********uart0*********/
+&uart0 {
+	status = "okay";
+};
+
+/**********adc**********/
+&saradc {
+	vref-supply = <&vcc_1v8>;
+	status = "okay";
+};
+
+&tsadc {
+	pinctrl-names = "gpio", "otpout";
+	pinctrl-0 = <&wdt_tsadc_gpio>;
+	pinctrl-1 = <&rm_io21_wdt_tsadc_shut>;
+
+	status = "okay";
+};
+
+/**********usb**********/
+&usb20_otg0 {
+	dr_mode = "peripheral";
+	/* vbus-supply = <&vcc5v0_otg0>;
+	rockchip,gpio-vbus-det; */
+	status = "okay";
+};
+
+&usb20_otg1 {
+	dr_mode = "host";
+	status = "okay";
+};
+
+&usb2phy {
+	/* extcon = <&extcon_usb>; */
+	status = "okay";
+};
+
+&u2phy_otg0 {
+	status = "okay";
+};
+
+&u2phy_otg1 {
+	status = "okay";
+};
+
+/**********pinctrl**********/
+&pinctrl {
+	sdmmc {
+		/omit-if-no-ref/
+		sdmmc_pwren: sdmmc-pwren {
+			rockchip,pins = <1 RK_PB7 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+
+		sdmmc_det: sdmmc-det {
+			rockchip,pins = <1 RK_PB6 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	tsadc {
+		wdt_tsadc_gpio: wdt-tsadc-gpio {
+			rockchip,pins = <0 RK_PC5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
+/*
+ * ---- ADDED BY meta-luckfox-lyra (not vendor) ----
+ *
+ * DDR window shared between Linux and the Cortex-M0.
+ *
+ * The rk3506_rproc driver maps 0x03C00000 (1 MiB) so firmware linked against
+ * that address can exchange data with Linux. It must be carved out of the
+ * kernel's memory or the page allocator will hand it to someone else and the
+ * M0 will corrupt it. Nothing else reserves it -- the existing reservations in
+ * rk3502.dtsi (trust@0, ramoops@83000, cma, drm-logo) are all low memory.
+ *
+ * "no-map" keeps the kernel from creating a cached linear mapping for it,
+ * which matters because the M0 writes it without participating in A7 cache
+ * coherency.
+ *
+ * This is also the only practical place for M0 status: the SRAM the firmware
+ * runs from becomes inaccessible to the A7 side once the core is released.
+ */
+&reserved_memory {
+	mcu_shmem: mcu-shmem@3c00000 {
+		reg = <0x03c00000 0x100000>;
+		no-map;
+	};
+};

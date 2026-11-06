@@ -1,0 +1,3 @@
+# Rockchip's bt platform rfkill and hci0 both register soft-blocked. Unblock
+# Bluetooth when they appear so the radio is usable without manual rfkill.
+ACTION=="add", SUBSYSTEM=="rfkill", ATTR{type}=="bluetooth", ATTR{soft}="0"

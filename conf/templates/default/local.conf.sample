@@ -1,0 +1,89 @@
+# Generated from meta-luckfox-lyra/conf/templates/default/
+#
+# meta-luckfox-lyra is a pure BSP layer (machines + recipes, no distro), so the
+# distro-level policy the image depends on lives here rather than in a distro
+# config. This file is part of the layer, so deleting build/ and re-running
+# scripts/setup.sh reproduces it exactly -- the layer stays the source of truth.
+
+# Which board:
+#   luckfox-lyra-pi-a   Model A / A-W -- 8 GB eMMC, no microSD slot
+#   luckfox-lyra-pi-b   Model B / B-W -- microSD, no eMMC
+MACHINE ?= "luckfox-lyra-pi-b"
+
+DISTRO ?= "poky"
+
+# --- required policy ---------------------------------------------------------
+
+# systemd: networkd handles DHCP on both Ethernet ports, and the rootfs-grow
+# unit is a systemd service.
+INIT_MANAGER = "systemd"
+
+# Yocto 6.0 adds DISTRO_FEATURES_DEFAULTS automatically; unwanted ones are
+# opted out rather than removed.
+#   x11 wayland vulkan opengl: RK3506B has a 2D blitter only -- no 3D GPU, no
+#     VPU, no NPU.
+#   ptest: makes recipes build their test suites -- a lot of extra build time
+#     for a board image (and on scarthgap it broke libgpiod and gnutls).
+DISTRO_FEATURES_OPTED_OUT += "x11 wayland vulkan opengl ptest"
+
+# Since Yocto 5.2 systemd disables predictable interface names unless
+# pni-names is set. Keep them, so the two GMACs stay end0/end1 as before.
+DISTRO_FEATURES:append = " pni-names"
+
+PACKAGE_CLASSES ?= "package_ipk"
+
+# Nobara/Fedora hosts are not in Yocto's tested-distro list; advisory only.
+SANITY_TESTED_DISTROS = ""
+
+# --- user-tunable ------------------------------------------------------------
+
+# Shared between machine builds.
+DL_DIR ?= "${TOPDIR}/../downloads"
+SSTATE_DIR ?= "${TOPDIR}/../sstate-cache"
+# Hash equivalence (BB_HASHSERVE = "auto" by default since 6.0) keeps its
+# database next to the sstate it describes.
+BB_HASHSERVE_DB_DIR ?= "${SSTATE_DIR}"
+
+# These MULTIPLY: BB_NUMBER_THREADS is how many recipe tasks run at once and
+# PARALLEL_MAKE is the -j given to EACH of them, so 12 x 12 would peak near 144
+# compilers, not 12. Keep the product near your core count.
+BB_NUMBER_THREADS ?= "4"
+PARALLEL_MAKE ?= "-j 3"
+
+# Rockchip's vendor kernel repo carries the full history of every vendor
+# branch; a shallow fetch of the pinned revision avoids a multi-GB clone.
+BB_GIT_SHALLOW:pn-linux-luckfox-lyra = "1"
+BB_GIT_SHALLOW_DEPTH:pn-linux-luckfox-lyra = "1"
+
+# Optional: bake WiFi credentials into the image. Left unset, a commented
+# template is installed and wpa_supplicant stays disabled.
+#LUCKFOX_WIFI_SSID = "my-ssid"
+#LUCKFOX_WIFI_PSK = "my-psk"
+#LUCKFOX_WIFI_COUNTRY = "BE"
+
+# The AIC8800DC wireless firmware is commercially licensed, so accepting that
+# flag is required for the -W board variants. This is deliberately here and not
+# in the layer's layer.conf: accepting a license is the integrator's decision,
+# and setting it from layer.conf would silently change it for every other layer
+# in the build. The rkbin boot blobs (DDR init, OP-TEE) are
+# proprietary-but-redistributable and are covered by the same flag.
+LICENSE_FLAGS_ACCEPTED:append = " commercial"
+
+# --- image content parity with the scarthgap image --------------------------
+# bluez5 5.86 ships a /usr/lib/systemd/user/dbus-org.bluez.obex.service link
+# in the main package whose target lives in bluez5-obex, so package.bbclass
+# turns the dangling link into RDEPENDS:bluez5 = bluez5-obex -- which drags in
+# obexd (enabled at boot), libical and ICU (~40 MB). Scarthgap shipped no
+# obexd; OBEX file transfer has no use here, so build bluez5 without it.
+PACKAGECONFIG:remove:pn-bluez5 = "obex-profiles"
+# systemd 259 RRECOMMENDS systemd-mime (journal MIME types for desktops),
+# which pulls shared-mime-info-data (2.5 MB). Not in the scarthgap image.
+BAD_RECOMMENDATIONS += "systemd-mime"
+
+# meta-rauc is in BBLAYERS because meta-luckfox-lyra carries the PLC's RAUC
+# recipes (rauc-conf.bbappend, the bundle), but the Lyra Pi images do not use
+# RAUC; silence meta-rauc's "rauc not in DISTRO_FEATURES" sanity warning.
+# (the PLC build enables DISTRO_FEATURES rauc instead; drop this then)
+SKIP_META_RAUC_FEATURE_CHECK = "1"
+
+CONF_VERSION = "2"

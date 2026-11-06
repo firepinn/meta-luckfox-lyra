@@ -1,0 +1,21 @@
+[Unit]
+Description=Keep the system journal on /data
+Documentation=man:journald.conf(5)
+# /var/log is a RAM disk: without this, the log of a boot (or of a shutdown
+# that hangs) is gone after the next power cycle. Bind /data/journal there
+# before journald moves its runtime journal to /var/log/journal.
+DefaultDependencies=no
+RequiresMountsFor=/data /var/volatile
+Before=systemd-journal-flush.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# /var/log is a symlink to volatile/log, which may not exist yet this early:
+# create and bind the real directory, not the path through the symlink.
+ExecStart=/bin/mkdir -p /data/journal /var/volatile/log/journal
+ExecStart=/bin/mount --bind /data/journal /var/volatile/log/journal
+
+[Install]
+WantedBy=systemd-journal-flush.service

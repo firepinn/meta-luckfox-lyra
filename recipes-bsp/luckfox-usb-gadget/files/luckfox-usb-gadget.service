@@ -1,0 +1,12 @@
+[Unit]
+Description=USB-C network gadget (CDC-NCM)
+After=sys-kernel-config.mount systemd-modules-load.service
+Before=systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/luckfox-usb-gadget
+
+[Install]
+WantedBy=multi-user.target

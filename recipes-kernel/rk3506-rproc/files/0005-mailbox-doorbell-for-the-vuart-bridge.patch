@@ -1,0 +1,326 @@
+From: firepinn <4785534+firepinn@users.noreply.github.com>
+Subject: [PATCH] rk3506_rproc: mailbox doorbell for the M0's virtual UART
+Upstream-Status: Pending
+
+The M0 firmware publishes its serial traffic in the shared DDR window, and the
+userspace bridge that presents those channels as ptys had to sweep the rings on
+a 1 ms timer: latency on every byte, and a wakeup every millisecond on a
+channel that is idle almost all the time.
+
+The SoC has a mailbox for exactly this. The M0 writes B2A_CMD/DAT after
+producing data, that raises RX_DONE in B2A_STATUS, and GIC SPI 138 fires here.
+Turn it into a poll()able sysfs attribute so the bridge can block:
+
+    cat /sys/devices/platform/fff84000.mcu/vuart_event    -> doorbell count
+    poll(POLLPRI) on the same file                        -> wakes on a ring
+
+A count rather than a flag lets a reader distinguish "nothing happened" from
+"several things happened while I was busy".
+
+Linux's mailbox framework is deliberately not used. It would claim the block
+and its channels, and there is no message for it to carry: the payload is the
+ring and the mailbox is only the bell. The mailbox node stays disabled and this
+driver holds PCLK_MAILBOX through the mcu node instead.
+
+The doorbell is an optimisation, so every failure path here degrades to a
+warning and the bridge falls back to sweeping -- an M0 that cannot ring is
+still an M0 that works. On unload the interrupt is masked before the mapping is
+released, so a late interrupt cannot reach an ISR whose registers are gone.
+
+Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
+---
+--- a/rk3506_rproc.c
++++ b/rk3506_rproc.c
+@@ -37,6 +37,7 @@
+ #include <linux/clk.h>
+ #include <linux/reset.h>
+ #include <linux/elf.h>
++#include <linux/interrupt.h>
+ 
+ int rproc_elf_sanity_check(struct rproc *rproc, const struct firmware *fw);
+ u64 rproc_elf_get_boot_addr(struct rproc * rproc, const struct firmware * fw);
+@@ -90,6 +91,53 @@
+   #define RK3506_MCU_TCM_SIZE                     0x4000
+ #endif
+ 
++/*
++ * Mailbox 0, used purely as a doorbell from the M0.
++ *
++ * The M0 publishes its serial traffic in the shared DDR rings; without a
++ * doorbell the userspace bridge has to sweep them on a timer, which costs
++ * latency and wakes the CPU on an idle channel. The M0 writes B2A_CMD/DAT,
++ * that raises RX_DONE here, and this driver turns it into a poll()able sysfs
++ * event so the bridge sleeps until there is something to do.
++ *
++ * Registers are the "V2" layout (rockchip,rk3576-mailbox). Linux's mailbox
++ * driver is deliberately not used: it would claim the block and its channels,
++ * and there is no message for the framework to carry -- the payload is the
++ * ring, this is only the bell.
++ */
++#define RK3506_MBOX_ADDR                    0xFF290000
++#define RK3506_MBOX_SIZE                          0x20
++
++#define RK3506_MBOX_A2B_CMD                       0x08
++#define RK3506_MBOX_B2A_INTEN                     0x10
++#define RK3506_MBOX_B2A_STATUS                    0x14
++
++/*
++ * The bit a send raises is TX_DONE, bit 0 -- named for the sender's point of
++ * view, and it is what the *receiver* watches. Measured: with the trigger
++ * method set to 0 and TX_DONE enabled, a write to B2A_CMD sets B2A_STATUS bit
++ * 0 and fires this interrupt. Rockchip's own driver agrees; its v2 startup
++ * enables TX_DONE in the receive-side INTEN, and its legacy ISR tests BIT(idx),
++ * which is bit 0 for channel 0. Watching RX_DONE instead sees nothing at all.
++ *
++ * Bit 8 selects the trigger: 0 = writing CMD triggers, 1 = writing CMD then
++ * DAT does. 0 is simpler and needs one store from the M0.
++ *
++ * The upper half of an INTEN write is a per-bit write-enable mask.
++ */
++#define RK3506_MBOX_STATUS_TX_DONE               BIT(0)
++#define RK3506_MBOX_STATUS_RX_DONE               BIT(1)
++#define RK3506_MBOX_STATUS_MASK      (RK3506_MBOX_STATUS_TX_DONE | \
++                                      RK3506_MBOX_STATUS_RX_DONE)
++
++#define RK3506_MBOX_INTEN_TRIGGER_CMD            BIT(16 + 8)
++#define RK3506_MBOX_INTEN_TX_DONE      (BIT(16 + 0) | BIT(0))
++
++/* Value is incidental -- the M0 only needs the interrupt -- but a
++ * recognisable one makes a stray mailbox easy to identify.
++ */
++#define RK3506_MBOX_CMD_VUART               0x56555254  /* "VURT" */
++
+ #define RK3506_MCU_SHMEM_ADDR               0x03C00000
+ #define RK3506_MCU_SHMEM_SIZE                 0x100000
+ 
+@@ -148,6 +196,8 @@
+   struct reset_control *    rst_h_m0;
+   struct reset_control *    rst_m0_jtag;
+   struct reset_control *    rst_hresetn_m0_ac;
++  struct reset_control *    rst_mailbox;
++  struct reset_control *    rst_intmux;
+ 
+   uint8_t *                 tcm_virt;
+   phys_addr_t               tcm_phys;
+@@ -158,6 +208,10 @@
+   uint8_t *                 regs_GRF;  // FF288
+ 
+   uint8_t *                 shmem_virt;  // 0x03C00000
++  uint8_t *                 regs_MBOX;   // FF290000, doorbell from the M0
++
++  int                       mbox_irq;
++  atomic_t                  vuart_events;  // bumped per doorbell
+ 
+   // Set once the ELF has been written into the TCM. See
+   // rk3506_rproc_load_once() for why a second write must be avoided.
+@@ -395,6 +449,89 @@
+ 	return fw_name;
+ }
+ 
++static irqreturn_t rk3506_mbox_isr(int irq, void * arg)
++{
++  struct platform_device *  pdev = arg;
++  struct rproc *            rproc = platform_get_drvdata(pdev);
++  rk3506_mcu_t *            mcu;
++  u32                       status;
++
++  if (!rproc)
++    return IRQ_NONE;
++
++  mcu = rproc->priv;
++
++  status = readl(mcu->regs_MBOX + RK3506_MBOX_B2A_STATUS);
++  if (!(status & RK3506_MBOX_STATUS_MASK))
++    return IRQ_NONE;
++
++  /*
++   * Write-1-to-clear, and clear every bit that is set rather than only the one
++   * we came for: the line is level triggered, so a bit left standing re-asserts
++   * immediately. Acknowledging only RX_DONE while the M0 raises TX_DONE storms
++   * the CPU until the kernel disables the interrupt for us -- 53640 of them
++   * before that was spotted.
++   */
++  writel(status & RK3506_MBOX_STATUS_MASK,
++         mcu->regs_MBOX + RK3506_MBOX_B2A_STATUS);
++
++  atomic_inc(&mcu->vuart_events);
++  sysfs_notify(&pdev->dev.kobj, NULL, "vuart_event");
++
++  return IRQ_HANDLED;
++}
++
++/*
++ * vuart_event: poll()able doorbell for the userspace bridge.
++ *
++ * Reading it returns a monotonic count of doorbells. poll() on it returns
++ * POLLPRI when the M0 rings, which lets the bridge block instead of sweeping
++ * the rings on a timer. A count rather than a flag means a reader can tell
++ * "nothing happened" from "several things happened while I was busy".
++ */
++static ssize_t vuart_event_show(struct device * dev, struct device_attribute * attr, char * buf)
++{
++  struct rproc *   rproc = platform_get_drvdata(to_platform_device(dev));
++  rk3506_mcu_t *   mcu;
++
++  if (!rproc)
++    return -ENODEV;
++
++  mcu = rproc->priv;
++  return sysfs_emit(buf, "%u\n", (unsigned)atomic_read(&mcu->vuart_events));
++}
++static DEVICE_ATTR_RO(vuart_event);
++
++/*
++ * vuart_kick: ring the doorbell in the other direction.
++ *
++ * The A7 -> M0 half is symmetric: writing A2B_CMD raises TX_DONE on the M0's
++ * side, which is what the M0 waits on. Without it the M0 only notices queued
++ * bytes when its main loop next sweeps the rings.
++ *
++ * Exposed as a write-only attribute so the userspace bridge can ring it right
++ * after it fills the ring; the value written is ignored. The M0 configures the
++ * trigger method for this half itself, so all that is needed here is the
++ * store.
++ */
++static ssize_t vuart_kick_store(struct device * dev, struct device_attribute * attr,
++                                const char * buf, size_t count)
++{
++  struct rproc *   rproc = platform_get_drvdata(to_platform_device(dev));
++  rk3506_mcu_t *   mcu;
++
++  if (!rproc)
++    return -ENODEV;
++
++  mcu = rproc->priv;
++  if (!mcu->regs_MBOX)
++    return -ENODEV;
++
++  writel(RK3506_MBOX_CMD_VUART, mcu->regs_MBOX + RK3506_MBOX_A2B_CMD);
++  return count;
++}
++static DEVICE_ATTR_WO(vuart_kick);
++
+ /*
+  * m0_status: the firmware's heartbeat, in one line.
+  *
+@@ -498,6 +635,10 @@
+     rproc_free(rproc);
+     return PTR_ERR(mcu->tcm_virt);
+   }
++  mcu->regs_MBOX = ioremap(RK3506_MBOX_ADDR, RK3506_MBOX_SIZE);
++  if (!mcu->regs_MBOX)
++    dev_warn(&pdev->dev, "could not map the mailbox; bridge will poll");
++
+   mcu->shmem_virt = ioremap(RK3506_MCU_SHMEM_ADDR, RK3506_MCU_SHMEM_SIZE);
+ 
+   // make the PMU accessible for this module
+@@ -577,6 +718,82 @@
+   if (ret)
+     dev_warn(&pdev->dev, "could not create m0_status attribute: %d", ret);
+ 
++  /*
++   * The doorbell is an optimisation, not a requirement: without it the bridge
++   * falls back to sweeping the rings. So a failure here is a warning and the
++   * driver carries on, rather than refusing to bring the M0 up at all.
++   */
++  /*
++   * Take the mailbox out of reset. Nothing else does: its node stays disabled
++   * so Linux's mailbox driver never probes, and a clocked-but-reset block
++   * accepts register writes, reads them back, and latches no status at all --
++   * which looks exactly like a wrong trigger sequence.
++   */
++  mcu->rst_mailbox = devm_reset_control_get_optional(&pdev->dev, "p_mailbox");
++  if (IS_ERR(mcu->rst_mailbox))
++  {
++    dev_warn(&pdev->dev, "no mailbox reset: %ld", PTR_ERR(mcu->rst_mailbox));
++    mcu->rst_mailbox = NULL;
++  }
++  else if (mcu->rst_mailbox)
++  {
++    reset_control_deassert(mcu->rst_mailbox);
++  }
++
++  /*
++   * INTMUX likewise: it is the only documented path for a peripheral interrupt
++   * to reach the M0's NVIC, and it too is clocked-and-reset-gated at power-on,
++   * with writes to a gated block vanishing silently.
++   */
++  mcu->rst_intmux = devm_reset_control_get_optional(&pdev->dev, "p_intmux");
++  if (IS_ERR(mcu->rst_intmux))
++  {
++    dev_warn(&pdev->dev, "no intmux reset: %ld", PTR_ERR(mcu->rst_intmux));
++    mcu->rst_intmux = NULL;
++  }
++  else if (mcu->rst_intmux)
++  {
++    reset_control_deassert(mcu->rst_intmux);
++  }
++
++  atomic_set(&mcu->vuart_events, 0);
++  mcu->mbox_irq = platform_get_irq(pdev, 0);
++  if (mcu->mbox_irq < 0)
++  {
++    dev_info(&pdev->dev, "no mailbox interrupt in DT; bridge will poll");
++    mcu->mbox_irq = 0;
++  }
++  else
++  {
++    ret = device_create_file(&pdev->dev, &dev_attr_vuart_event);
++    if (ret)
++      dev_warn(&pdev->dev, "could not create vuart_event attribute: %d", ret);
++
++    ret = device_create_file(&pdev->dev, &dev_attr_vuart_kick);
++    if (ret)
++      dev_warn(&pdev->dev, "could not create vuart_kick attribute: %d", ret);
++
++    ret = devm_request_irq(&pdev->dev, mcu->mbox_irq, rk3506_mbox_isr,
++                           IRQF_SHARED, "rk3506-m0-mbox", pdev);
++    if (ret)
++    {
++      dev_warn(&pdev->dev, "could not request mailbox irq %d: %d",
++               mcu->mbox_irq, ret);
++      mcu->mbox_irq = 0;
++    }
++    else
++    {
++      /* Trigger on a plain CMD write, clear anything stale, then enable. */
++      writel(RK3506_MBOX_INTEN_TRIGGER_CMD,
++             mcu->regs_MBOX + RK3506_MBOX_B2A_INTEN);
++      writel(RK3506_MBOX_STATUS_MASK,
++             mcu->regs_MBOX + RK3506_MBOX_B2A_STATUS);
++      writel(RK3506_MBOX_INTEN_TX_DONE,
++             mcu->regs_MBOX + RK3506_MBOX_B2A_INTEN);
++      dev_info(&pdev->dev, "M0 doorbell on irq %d", mcu->mbox_irq);
++    }
++  }
++
+   return 0;
+ }
+ 
+@@ -602,6 +819,18 @@
+   struct rproc *   rproc = platform_get_drvdata(pdev);
+   rk3506_mcu_t *   mcu = rproc->priv;
+ 
++  /* Mask the doorbell before the mapping goes away, so a late interrupt
++   * cannot reach an ISR whose registers have been unmapped.
++   */
++  if (mcu->regs_MBOX)
++    writel(BIT(16 + 0), mcu->regs_MBOX + RK3506_MBOX_B2A_INTEN);
++
++  if (mcu->mbox_irq)
++  {
++    device_remove_file(&pdev->dev, &dev_attr_vuart_kick);
++    device_remove_file(&pdev->dev, &dev_attr_vuart_event);
++  }
++
+   device_remove_file(&pdev->dev, &dev_attr_m0_status);
+ 
+   /*
+@@ -627,6 +856,7 @@
+ 
+   if (mcu->tcm_virt)    iounmap(mcu->tcm_virt);
+   if (mcu->shmem_virt)  iounmap(mcu->shmem_virt);
++  if (mcu->regs_MBOX)   iounmap(mcu->regs_MBOX);
+ 
+   if (mcu->regs_PMU)    iounmap(mcu->regs_PMU);
+   if (mcu->regs_CRU)    iounmap(mcu->regs_CRU);

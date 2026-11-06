@@ -1,0 +1,98 @@
+From: firepinn <4785534+firepinn@users.noreply.github.com>
+Subject: [PATCH] rk3506_rproc: make stop/start work by not reloading the TCM
+Upstream-Status: Pending
+
+Writing to /sys/class/remoteproc/remoteproc0/state with "stop" then "start"
+hard-hangs the A7 -- no console output at all, power cycle required.
+
+Cause: rk3506_rproc_start() asks the secure firmware to map the SRAM as the
+M0's TCM (SIP_MCU_CFG / MCU_CODE_START_ADDR), which takes that SRAM away from
+the A7 side. Stopping the core does not give it back, and the only
+SIP_MCU_CFG sub-configs are address configuration (CODE_START_ADDR,
+EXPERI_START_ADDR, SRAM_START_ADDR, EXSRAM_START_ADDR) -- none documented as
+releasing the mapping. remoteproc reloads the firmware on every rproc_boot(),
+so the restart calls rproc_elf_load_segments() again, writes into a window the
+A7 can no longer reach, and takes an unrecoverable external abort.
+
+The image is still resident in SRAM after a stop, so a restart does not need it
+rewritten. Load once, remember that, and skip subsequent loads: stop/start then
+works reliably.
+
+Remaining limitation, stated rather than hidden: loading *different* firmware
+still needs a reboot. Doing that at runtime needs either an undocumented call to
+hand the SRAM back, or running the M0 from DDR instead of TCM.
+
+diff --git a/rk3506_rproc.c b/rk3506_rproc.c
+index b730d1f..cd00ccd 100644
+--- a/rk3506_rproc.c
++++ b/rk3506_rproc.c
+@@ -132,6 +132,10 @@ typedef struct
+ 
+   uint8_t *                 shmem_virt;  // 0x03C00000
+ 
++  // Set once the ELF has been written into the TCM. See
++  // rk3506_rproc_load_once() for why a second write must be avoided.
++  bool                      fw_resident;
++
+   struct platform_device *  pdev;
+ //
+ } rk3506_mcu_t;
+@@ -290,6 +294,49 @@ static void * my_da_to_va(struct rproc * rproc, u64 da, size_t len, bool * is_io
+ 
+ #endif
+ 
++/*
++ * Load the ELF, but only ever once.
++ *
++ * rk3506_rproc_start() asks the secure firmware to map the SRAM as the M0's
++ * TCM (SIP_MCU_CFG / MCU_CODE_START_ADDR). That mapping takes the SRAM away
++ * from the A7 side and stopping the core does not hand it back -- the only
++ * SIP_MCU_CFG sub-configs are address configuration (CODE_START_ADDR,
++ * EXPERI_START_ADDR, SRAM_START_ADDR, EXSRAM_START_ADDR) and none of them is
++ * documented as releasing it.
++ *
++ * remoteproc reloads the firmware on every rproc_boot(), so a stop/start cycle
++ * would call rproc_elf_load_segments() again, write into a window the A7 can no
++ * longer reach, take an unrecoverable external abort and hang the system hard
++ * (no console, power cycle required).
++ *
++ * The image is still sitting in the SRAM after a stop, so a restart does not
++ * need it rewritten: skip the reload and let the resident image run again.
++ * That makes stop -> start work reliably.
++ *
++ * The limitation this leaves: loading *different* firmware still needs a
++ * reboot. Doing that at runtime requires either an undocumented call to hand
++ * the SRAM back, or running the M0 from DDR instead of TCM (see
++ * docs/CORTEX-M0.md).
++ */
++static int rk3506_rproc_load_once(struct rproc * rproc, const struct firmware * fw)
++{
++  rk3506_mcu_t *  mcu = rproc->priv;
++  int             ret;
++
++  if (mcu->fw_resident)
++  {
++    dev_info(&rproc->dev,
++             "firmware already resident in TCM, skipping reload (restarting the resident image)");
++    return 0;
++  }
++
++  ret = rproc_elf_load_segments(rproc, fw);
++  if (!ret)
++    mcu->fw_resident = true;
++
++  return ret;
++}
++
+ static const struct rproc_ops rk3506_rproc_ops =
+ {
+   .start = rk3506_rproc_start,
+@@ -299,7 +346,7 @@ static const struct rproc_ops rk3506_rproc_ops =
+   .load = rk3506_rproc_load,
+ #else
+   .da_to_va = my_da_to_va,
+-	.load = rproc_elf_load_segments,
++	.load = rk3506_rproc_load_once,
+ 	// .parse_fw = rk3506_rproc_parse_fw,
+ 	.find_loaded_rsc_table = rproc_elf_find_loaded_rsc_table,
+ 	.sanity_check = rproc_elf_sanity_check,

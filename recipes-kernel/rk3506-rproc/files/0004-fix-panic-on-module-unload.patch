@@ -1,0 +1,65 @@
+From: firepinn <4785534+firepinn@users.noreply.github.com>
+Subject: [PATCH] rk3506_rproc: fix kernel panic on module unload
+Upstream-Status: Pending
+
+rmmod rk3506_rproc oopses and panics the board.
+
+rk3506_rproc_remove() stops the core, unmaps every register window, and only
+then calls rproc_del(). But rproc_del() shuts the remote processor down if it
+is still booted -- and with auto_boot it always is -- which calls back into
+.stop, which writes PMU_INT_MASK_CON through mcu->regs_PMU. By then that
+mapping is gone, so the write lands on an unmapped address and takes an oops.
+With panic=10 on the kernel command line the board reboots; without it, it
+just dies.
+
+Call rproc_del() first, while the mappings it depends on are still valid, and
+unmap afterwards. Also drop the direct rk3506_rproc_shutdown() call: it stops
+the core, and rproc_del() already does that through the proper path, so the
+old code stopped it twice. It stays registered as the platform driver's
+.shutdown callback for system shutdown.
+
+This matters beyond tidiness. A fresh probe *loads* the firmware, where a
+stop/start only restarts the image already resident in the TCM (see
+0002-restart-without-reloading-tcm.patch), so rmmod/insmod is the one way to
+put *different* firmware on the M0 without rebooting -- and it was unusable.
+
+Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
+---
+--- a/rk3506_rproc.c
++++ b/rk3506_rproc.c
+@@ -604,7 +604,26 @@
+ 
+   device_remove_file(&pdev->dev, &dev_attr_m0_status);
+ 
+-  rk3506_rproc_shutdown(pdev);
++  /*
++   * Order matters, and getting it wrong panics the machine.
++   *
++   * rproc_del() shuts the remote processor down if it is still booted -- and
++   * with auto_boot it always is -- which calls back into our .stop, which
++   * writes PMU_INT_MASK_CON through mcu->regs_PMU. So rproc_del() has to run
++   * while those mappings are still valid.
++   *
++   * The original order stopped the core, unmapped every register window, and
++   * only then called rproc_del(). The shutdown inside rproc_del() then wrote
++   * to an unmapped address: rmmod took a kernel oops and the board panicked
++   * and rebooted. That also made rmmod/insmod useless as a way to load
++   * different M0 firmware, which is the one thing it is good for -- a fresh
++   * probe reloads instead of restarting the resident image.
++   *
++   * rk3506_rproc_shutdown() is not called here either: it stops the core, and
++   * rproc_del() already does that through the proper path. It stays as the
++   * platform driver's .shutdown callback for system shutdown.
++   */
++  rproc_del(rproc);
+ 
+   if (mcu->tcm_virt)    iounmap(mcu->tcm_virt);
+   if (mcu->shmem_virt)  iounmap(mcu->shmem_virt);
+@@ -613,7 +632,6 @@
+   if (mcu->regs_CRU)    iounmap(mcu->regs_CRU);
+   if (mcu->regs_GRF)    iounmap(mcu->regs_GRF);
+ 
+-  rproc_del(rproc);
+   rproc_free(rproc);
+   return 0;
+ }

@@ -1,0 +1,77 @@
+# kas configuration for the Luckfox Lyra Pi.
+#
+# Equivalent to scripts/setup.sh, for anyone who prefers kas:
+#
+#   kas build meta-luckfox-lyra/kas/luckfox-lyra-pi.yml
+#
+# Revisions are pinned to match scripts/setup.sh -- keep the two in step.
+header:
+  version: 14
+
+distro: poky
+target: luckfox-image
+machine: luckfox-lyra-pi-b
+
+repos:
+  # This layer, as checked out by kas.
+  meta-luckfox-lyra:
+
+  # Yocto 6.0 "wrynose": no poky combined repo; bitbake, OE-Core and
+  # meta-yocto are separate (yocto-6.0.4 tags).
+  bitbake:
+    url: https://git.openembedded.org/bitbake
+    branch: "2.18"
+    commit: 51fd94a67fa17650a9ff623492005972bbc7d26f
+    layers:
+      .: disabled
+
+  openembedded-core:
+    url: https://git.openembedded.org/openembedded-core
+    branch: wrynose
+    commit: 0f03c732a0a2d0506b41b1abe60b3f368b2300dc
+    layers:
+      meta:
+
+  meta-yocto:
+    url: https://git.yoctoproject.org/meta-yocto
+    branch: wrynose
+    commit: 7c25b11156553145fa6b241a2d4f65d94438f804
+    layers:
+      meta-poky:
+
+  meta-openembedded:
+    url: https://git.openembedded.org/meta-openembedded
+    branch: wrynose
+    commit: c734c2cb9713dbd6d50697a9f6c25ebdf3ae589e
+    layers:
+      meta-oe:
+
+  meta-arm:
+    url: https://git.yoctoproject.org/meta-arm
+    branch: wrynose
+    commit: 673e8d7c5dcd14de58092eb73e6ecc5eee5c1735
+    layers:
+      meta-arm-toolchain:
+
+  meta-rauc:
+    url: https://github.com/rauc/meta-rauc
+    branch: wrynose
+    commit: 38da0e5866a953e664001ba90b5edad68d68cd5d
+
+local_conf_header:
+  policy: |
+    # meta-luckfox-lyra is a pure BSP layer, so distro-level policy lives here.
+    INIT_MANAGER = "systemd"
+    DISTRO_FEATURES_OPTED_OUT += "x11 wayland vulkan opengl ptest"
+    # keep predictable interface names (end0/end1); off by default since 5.2
+    DISTRO_FEATURES:append = " pni-names"
+    PACKAGE_CLASSES ?= "package_ipk"
+    SANITY_TESTED_DISTROS = ""
+  parallelism: |
+    # These MULTIPLY -- keep the product near your core count.
+    BB_NUMBER_THREADS ?= "4"
+    PARALLEL_MAKE ?= "-j 3"
+  shallow: |
+    # The Rockchip vendor kernel repo is huge; fetch only the pinned revision.
+    BB_GIT_SHALLOW:pn-linux-luckfox-lyra = "1"
+    BB_GIT_SHALLOW_DEPTH:pn-linux-luckfox-lyra = "1"

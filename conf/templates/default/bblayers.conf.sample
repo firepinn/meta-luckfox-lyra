@@ -1,0 +1,28 @@
+# Generated from meta-luckfox-lyra/conf/templates/default/
+#
+# Assumes all layers are siblings of openembedded-core (Yocto 6.0: no poky
+# combined repository any more):
+#   <workspace>/bitbake
+#   <workspace>/openembedded-core
+#   <workspace>/meta-yocto
+#   <workspace>/meta-openembedded
+#   <workspace>/meta-arm
+#   <workspace>/meta-rauc          (RAUC A/B, needed by luckfox-lyra-plc)
+#   <workspace>/meta-luckfox-lyra
+# which is what scripts/setup.sh and kas/luckfox-lyra-pi.yml produce.
+# ##OEROOT## is openembedded-core.
+
+LCONF_VERSION = "7"
+POKY_BBLAYERS_CONF_VERSION = "2"
+
+BBPATH = "${TOPDIR}"
+BBFILES ?= ""
+
+BBLAYERS ?= " \
+  ##OEROOT##/meta \
+  ##OEROOT##/../meta-yocto/meta-poky \
+  ##OEROOT##/../meta-openembedded/meta-oe \
+  ##OEROOT##/../meta-arm/meta-arm-toolchain \
+  ##OEROOT##/../meta-rauc \
+  ##OEROOT##/../meta-luckfox-lyra \
+  "

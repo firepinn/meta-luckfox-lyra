@@ -1,0 +1,156 @@
+From: firepinn <4785534+firepinn@users.noreply.github.com>
+Subject: [PATCH] rk3506_rproc: publish the M0 firmware heartbeat via sysfs
+Upstream-Status: Pending
+
+The M0 has no watchdog it is allowed to use: the SoC WDT belongs to the A7
+side, and Cortex-M0 has no core-local watchdog. Firmware running on it can
+therefore wedge with nothing noticing.
+
+remoteproc already gives the A7 a stronger recovery than a self-reset -- it can
+stop the core and reload its firmware -- but no way to decide when to use it,
+because a stuck core and a busy core look identical from here.
+
+So let the firmware publish a heartbeat in the shared DDR window and expose it
+here. The window is reserved no-map, so read() on /dev/mem fails with EFAULT,
+though mmap() does work -- devmem2 can reach it. This attribute is therefore a
+convenience rather than the only way in, and worth having for what it adds: no
+root /dev/mem access, no offset arithmetic, torn reads retried, and the field
+layout kept in one place shared with the firmware.
+
+    # cat /sys/devices/platform/mcu@fff84000/m0_status
+    version=1 seq=246 loops=123 micros=1048576 restart_cause=0
+
+The reader retries on a torn read rather than locking, since the writer is a
+core this side cannot pause.
+
+Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
+---
+--- a/rk3506_rproc.c
++++ b/rk3506_rproc.c
+@@ -93,6 +93,34 @@
+ #define RK3506_MCU_SHMEM_ADDR               0x03C00000
+ #define RK3506_MCU_SHMEM_SIZE                 0x100000
+ 
++/*
++ * Liveness block the M0 firmware publishes at the start of the shared DDR
++ * window. The M0 has no watchdog it may use -- the SoC WDT belongs to this
++ * side, and Cortex-M0 has no core-local one -- so supervision lives here
++ * instead: the firmware bumps a counter every main-loop pass, and this side,
++ * which can already stop and restart the core, can tell a wedged core from a
++ * busy one.
++ *
++ * Single writer, single reader, naturally aligned 32-bit words, so no locking.
++ * 'seq' is odd while the block is being written; retry on odd or changed.
++ */
++#define RK3506_M0_STATUS_MAGIC                0x4D43484E  /* status block magic */
++
++typedef struct
++{
++  u32  magic;
++  u32  version;
++  u32  seq;
++  u32  loops;
++  u32  micros_lo;
++  u32  micros_hi;
++  u32  restart_cause;
++  u32  stage;   /* last HAL init step the firmware entered */
++  u32  isr_ticks;
++  u32  isr_max_cycles;   /* longest observed ISR, in core clocks */
++  u32  vuart_resyncs;    /* crossed vuart ring index pairs recovered */
++} rk3506_m0_status_t;
++
+ // the register definitions of the beginning of the PMU
+ //
+ typedef struct
+@@ -368,6 +396,69 @@
+ 	return fw_name;
+ }
+ 
++/*
++ * m0_status: the firmware's heartbeat, in one line.
++ *
++ * Reading physical memory is not an option for userspace here: the shmem
++ * window is reserved no-map, so it is not System RAM and /dev/mem refuses it.
++ * This driver has it ioremapped already, which makes it the right place to
++ * publish it from.
++ */
++static ssize_t m0_status_show(struct device * dev, struct device_attribute * attr, char * buf)
++{
++  struct rproc *              rproc = platform_get_drvdata(to_platform_device(dev));
++  rk3506_mcu_t *              mcu;
++  rk3506_m0_status_t __iomem * st;
++  u32                         magic, version, seq1, seq2, loops, lo, hi, cause, stage;
++  u32                         isr_ticks, isr_max_cycles, vuart_resyncs;
++  int                         tries;
++
++  if (!rproc)
++    return -ENODEV;
++
++  mcu = rproc->priv;
++  if (!mcu->shmem_virt)
++    return -ENODEV;
++
++  st = (rk3506_m0_status_t __iomem *)mcu->shmem_virt;
++
++  magic = readl(&st->magic);
++  if (magic != RK3506_M0_STATUS_MAGIC)
++    return sysfs_emit(buf,
++                      "magic=0x%08x stage=%u isr_ticks=%u isr_max_cycles=%u (no firmware heartbeat)\n",
++                      magic, readl(&st->stage), readl(&st->isr_ticks),
++                      readl(&st->isr_max_cycles));
++
++  /* Retry rather than lock: the writer is a separate core we cannot stop. */
++  for (tries = 0; tries < 8; tries++)
++  {
++    seq1 = readl(&st->seq);
++    if (seq1 & 1)
++      continue;
++
++    version = readl(&st->version);
++    loops   = readl(&st->loops);
++    lo      = readl(&st->micros_lo);
++    hi      = readl(&st->micros_hi);
++    cause   = readl(&st->restart_cause);
++    stage   = readl(&st->stage);
++    isr_ticks = readl(&st->isr_ticks);
++    isr_max_cycles = readl(&st->isr_max_cycles);
++    vuart_resyncs  = readl(&st->vuart_resyncs);
++
++    seq2 = readl(&st->seq);
++    if (seq1 == seq2)
++      return sysfs_emit(buf,
++                        "version=%u seq=%u loops=%u micros=%llu restart_cause=%u stage=%u isr_ticks=%u isr_max_cycles=%u vuart_resyncs=%u\n",
++                        version, seq1, loops,
++                        ((u64)hi << 32) | lo, cause, stage, isr_ticks, isr_max_cycles,
++                        vuart_resyncs);
++  }
++
++  return sysfs_emit(buf, "torn read\n");
++}
++static DEVICE_ATTR_RO(m0_status);
++
+ static int rk3506_rproc_probe(struct platform_device * pdev)
+ {
+   struct rproc *      rproc;
+@@ -485,7 +576,11 @@
+   if (ret)
+     return ret;
+ 
+-  return ret;
++  ret = device_create_file(&pdev->dev, &dev_attr_m0_status);
++  if (ret)
++    dev_warn(&pdev->dev, "could not create m0_status attribute: %d", ret);
++
++  return 0;
+ }
+ 
+ static void rk3506_rproc_shutdown(struct platform_device * pdev)
+@@ -510,6 +605,8 @@
+   struct rproc *   rproc = platform_get_drvdata(pdev);
+   rk3506_mcu_t *   mcu = rproc->priv;
+ 
++  device_remove_file(&pdev->dev, &dev_attr_m0_status);
++
+   rk3506_rproc_shutdown(pdev);
+ 
+   if (mcu->tcm_virt)    iounmap(mcu->tcm_virt);

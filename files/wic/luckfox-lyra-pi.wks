@@ -1,0 +1,27 @@
+# Luckfox Lyra Pi (RK3506B) boot medium layout — identical for eMMC and microSD.
+#
+# Rockchip boot chain:
+#   BootROM reads the IDB at sector 64 (32 KiB) -> TPL (rkbin DDR init)
+#   -> SPL -> OP-TEE + U-Boot proper -> extlinux -> kernel
+#
+# u-boot-rockchip.bin is the single binman-packed blob containing all of the
+# above stages, written raw at 32 KiB. Offsets match agrif/debian-lyra, which
+# is validated on this board: 32 KiB U-Boot, ~16 MiB reserved before the first
+# partition.
+#
+#   32 KiB  : u-boot-rockchip.bin (raw, outside any partition)
+#   16 MiB  : /boot   vfat, 64 MiB  — zImage, DTB, extlinux/extlinux.conf
+#   ~80 MiB : /       ext4          — rootfs, grown to the medium on first boot
+
+part --source rawcopy --sourceparams="file=u-boot-rockchip.bin" --no-table --align 32
+
+part /boot --source bootimg-partition --fstype=vfat --label boot --align 16384 --size 64 --active
+
+# Sized to its contents; luckfox-growfs.service expands it on first boot.
+part / --source rootfs --fstype=ext4 --label root --align 4096 --fixed-size 2048M
+
+# Persistent data (settings, SSH host keys); grown to fill the medium on first
+# boot, so it is the last partition.
+part --fstype=ext4 --label data --align 4096 --size 128M
+
+bootloader --ptable msdos

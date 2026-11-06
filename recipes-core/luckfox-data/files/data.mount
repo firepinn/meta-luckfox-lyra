@@ -1,0 +1,12 @@
+[Unit]
+Description=Persistent data partition (settings, keys; survives image updates)
+Before=local-fs.target
+
+[Mount]
+What=/dev/disk/by-label/data
+Where=/data
+Type=ext4
+Options=defaults,noatime
+
+[Install]
+WantedBy=local-fs.target

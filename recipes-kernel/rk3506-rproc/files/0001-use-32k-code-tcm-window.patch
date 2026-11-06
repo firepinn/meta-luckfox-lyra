@@ -1,0 +1,32 @@
+From: firepinn <4785534+firepinn@users.noreply.github.com>
+Subject: [PATCH] rk3506_rproc: use the 32 KiB code TCM window
+Upstream-Status: Pending
+
+Select the 32 KiB window at 0xFFF84000 instead of the 16 KiB one at
+0xFFF88000.
+
+Firmware with a real protocol stack quickly outgrows 16 KiB: a bus PHY with
+a small portable application layer measured around 18 KiB at -Os -- just
+over the 16 KiB window, and comfortably inside 32 KiB.
+
+The alternative was to run the M0 from DDR, which also removes the size limit,
+but the M0 has no cache: every instruction fetch would cross the bus, adding
+latency and jitter. For bit-timing firmware, keeping the hot path in
+tightly-coupled memory is worth the constraint.
+
+Note the upstream README describes the 32 KiB window as if it were active; it
+is the disabled branch. Trust the code.
+
+diff --git a/rk3506_rproc.c b/rk3506_rproc.c
+index b730d1f..26564f7 100644
+--- a/rk3506_rproc.c
++++ b/rk3506_rproc.c
+@@ -82,7 +82,7 @@ struct resource_table *rproc_elf_find_loaded_rsc_table(struct rproc * rproc, con
+ #define ROCKCHIP_SIP_CONFIG_MCU_SRAM_START_ADDR		0x03
+ #define ROCKCHIP_SIP_CONFIG_MCU_EXSRAM_START_ADDR	0x04
+ 
+-#if 0 // 32k CODE TCM
++#if 1 // 32k CODE TCM
+   #define RK3506_MCU_TCM_ADDR                 0xFFF84000
+   #define RK3506_MCU_TCM_SIZE                     0x8000
+ #else // 16k CODE TCM

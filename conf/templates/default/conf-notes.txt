@@ -1,0 +1,18 @@
+Luckfox Lyra Pi (Rockchip RK3506B) build environment.
+
+Common targets:
+
+    bitbake luckfox-image
+
+Pick the board in conf/local.conf:
+
+    MACHINE = "luckfox-lyra-pi-b"    microSD  (Model B / B-W)
+    MACHINE = "luckfox-lyra-pi-a"    eMMC     (Model A / A-W)
+
+Flash:
+
+    ../meta-luckfox-lyra/scripts/flash.sh sd /dev/sdX     Model B
+    ../meta-luckfox-lyra/scripts/flash.sh emmc            Model A (maskrom)
+
+Serial console: UART0 on the 40-pin header, 115200 8N1, ttyS0.
+Login: root / root  (also over SSH).

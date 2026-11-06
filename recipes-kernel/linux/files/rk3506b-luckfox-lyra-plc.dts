@@ -1,0 +1,335 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Luckfox Lyra PLC: RK3506B, 512 MB DDR3L, 8 GB eMMC, 2x 10/100 Ethernet
+ * (CH182H PHYs), RS232 + RS485/RS422 + CAN on the screw terminal, two relays,
+ * 1.9" 170x320 ST7789V LCD with CST816 touch, PCF8563-compatible RTC, SHTC3
+ * temperature/humidity sensor, AIC8800DC WiFi 6 / BT 5.2 behind a CH334 USB
+ * hub, and a PWM-controlled CPU buck.
+ *
+ * Luckfox publishes no schematic or DTS for this board. Every pin below was
+ * taken from the device tree of Luckfox's own Debian image
+ * (/sys/firmware/fdt, kernel 6.1.99) on a running board, plus the GPIO
+ * numbers their plc_app keeps in /userdata/plc_config.json for the parts it
+ * drives from userspace (relays, RS485 driver enable).
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pwm/pwm.h>
+#include "rk3506-luckfox-lyra-ultra.dtsi"
+
+/ {
+	model = "Luckfox Lyra PLC";
+	compatible = "luckfox,lyra-plc", "rockchip,rk3506";
+
+	aliases {
+		rtc0 = &rtc;
+	};
+
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		/* 40 kHz, inverted: Luckfox's values, measured in debugfs/pwm. */
+		pwms = <&pwm0_4ch_2 0 25000 PWM_POLARITY_INVERTED>;
+		brightness-levels = <0 255>;
+		num-interpolated-steps = <255>;
+		default-brightness-level = <200>;
+	};
+
+	wireless_bluetooth: wireless-bluetooth {
+		compatible = "bluetooth-platdata";
+		BT,power_gpio = <&gpio1 RK_PC5 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};
+
+/*
+ * The CPU rail is a PWM-controlled buck on this board, not the fixed 0.9 V
+ * the Lyra Pi/Ultra dtsi describes. Left as regulator-fixed, cpufreq would
+ * run the OPP table up to 1.5 GHz without ever raising the voltage. Values
+ * are Luckfox's: continuous mode over the full duty range, 0.71..1.205 V.
+ */
+&vdd_cpu {
+	compatible = "pwm-regulator";
+	pwms = <&pwm0_4ch_0 0 5000 PWM_POLARITY_INVERTED>;
+	regulator-min-microvolt = <710000>;
+	regulator-max-microvolt = <1205000>;
+	regulator-init-microvolt = <1011000>;
+	/delete-property/ regulator-type;
+};
+
+&pwm0_4ch_0 {
+	pinctrl-names = "active";
+	pinctrl-0 = <&rm_io21_pwm0_ch0>;
+	status = "okay";
+};
+
+&pwm0_4ch_2 {
+	pinctrl-names = "active";
+	pinctrl-0 = <&rm_io5_pwm0_ch2>;
+	status = "okay";
+};
+
+/* Names for the lines userspace drives, so libgpiod can find them by name. */
+&gpio0 {
+	gpio-line-names =
+		/* A0-A7 */ "LCD_RST", "", "LCD_DC", "", "", "", "TP_RST", "TP_INT",
+		/* B0-B7 */ "", "", "", "", "", "", "", "RS485_DE",
+		/* C0-C7 */ "", "RELAY0", "RELAY1", "", "", "", "", "",
+		/* D0-D7 */ "", "", "", "", "", "", "", "";
+};
+
+/**********media**********/
+&mmc {
+	/* eMMC (8 GB) on the single SDMMC controller; no card slot. */
+	max-frequency = <52000000>;
+	mmc-ddr-1_8v;
+	bus-width = <4>;
+	supports-emmc;
+	cap-mmc-highspeed;
+	disable-wp;
+	non-removable;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc_clk_pins &sdmmc_cmd_pins &sdmmc_bus4_pins>;
+	status = "okay";
+};
+
+/**********ethernet**********/
+/*
+ * Same wiring as the Lyra Pi: two CH182H PHYs at MDIO address 1, 25 MHz
+ * reference from CLK_MAC_OUT, resets on gpio1 C0 (low) / C1 (high). The
+ * clk_mac_refout and widened reset timing are the Lyra Pi cold-boot fixes;
+ * see rk3506b-luckfox-lyra-pi.dts for the full reasoning.
+ */
+&gmac0 {
+	clocks = <&cru CLK_MAC0>, <&cru CLK_MAC0_PTP>,
+		 <&cru PCLK_MAC0>, <&cru ACLK_MAC0>,
+		 <&cru CLK_MAC_OUT>;
+	clock-names = "stmmaceth", "ptp_ref",
+		      "pclk_mac", "aclk_mac",
+		      "clk_mac_refout";
+	phy-mode = "rmii";
+	clock_in_out = "output";
+	assigned-clocks = <&cru CLK_MAC_OUT>;
+	assigned-clock-rates = <25000000>;
+	snps,reset-gpio = <&gpio1 RK_PC0 GPIO_ACTIVE_LOW>;
+	snps,reset-active-low;
+	snps,reset-delays-us = <20000 20000 300000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&eth_clk0_25m_out_pins
+		     &eth_rmii0_miim_pins
+		     &eth_rmii0_tx_bus2_pins
+		     &eth_rmii0_rx_bus2_pins
+		     &eth_rmii0_clk_pins
+		     &rmii0_rstn>;
+	phy-handle = <&rmii_phy0>;
+	status = "okay";
+};
+
+&gmac1 {
+	clocks = <&cru CLK_MAC1>, <&cru CLK_MAC1_PTP>,
+		 <&cru PCLK_MAC1>, <&cru ACLK_MAC1>,
+		 <&cru CLK_MAC_OUT>;
+	clock-names = "stmmaceth", "ptp_ref",
+		      "pclk_mac", "aclk_mac",
+		      "clk_mac_refout";
+	phy-mode = "rmii";
+	clock_in_out = "output";
+	snps,reset-gpio = <&gpio1 RK_PC1 GPIO_ACTIVE_HIGH>;
+	snps,reset-active-high;
+	snps,reset-delays-us = <20000 20000 300000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&eth_clk1_25m_out_pins
+		     &eth_rmii1_miim_pins
+		     &eth_rmii1_tx_bus2_pins
+		     &eth_rmii1_rx_bus2_pins
+		     &eth_rmii1_clk_pins
+		     &rmii1_rstn>;
+	phy-handle = <&rmii_phy1>;
+	status = "okay";
+};
+
+&mdio0 {
+	rmii_phy0: phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0x1>;
+		clocks = <&cru CLK_MAC_OUT>;
+		assigned-clocks = <&cru CLK_MAC_OUT>;
+		assigned-clock-rates = <25000000>;
+	};
+};
+
+&mdio1 {
+	rmii_phy1: phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0x1>;
+		clocks = <&cru CLK_MAC_OUT>;
+		assigned-clocks = <&cru CLK_MAC_OUT>;
+		assigned-clock-rates = <25000000>;
+	};
+};
+
+/**********usb**********/
+/* USB-C: device/gadget port (and maskrom flashing). */
+&usb20_otg0 {
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+/* CH334 hub: USB-A port + the on-board AIC8800DC. Must be host. */
+&usb20_otg1 {
+	dr_mode = "host";
+	status = "okay";
+};
+
+/**********field bus**********/
+/* RS232 on the screw terminal. */
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&rm_io10_uart1_tx &rm_io11_uart1_rx>;
+	status = "okay";
+};
+
+/*
+ * RS485 / RS422 on the screw terminal. The transceiver's driver enable is on
+ * gpio0 B7. Luckfox toggles it from userspace; here the kernel's RS485 mode
+ * drives it as RTS through mctrl_gpio, so it is correct for any application
+ * (stty, Modbus libraries, ...) without timing games in userspace. Turn RS485
+ * off with TIOCSRS485 to use the port as full-duplex RS422.
+ */
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&rm_io14_uart2_tx &rm_io16_uart2_rx>;
+	rts-gpios = <&gpio0 RK_PB7 GPIO_ACTIVE_HIGH>;
+	linux,rs485-enabled-at-boot-time;
+	rs485-rts-active-high;
+	status = "okay";
+};
+
+&can0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&rm_io12_can0_tx &rm_io13_can0_rx>;
+	status = "okay";
+};
+
+/**********display**********/
+/*
+ * 1.9" 170x320 IPS panel, ST7789V controller, write-only 4-wire SPI (no
+ * MISO). Driven by the generic MIPI DBI DRM driver: the init sequence is the
+ * firmware file named after the first compatible ("luckfox,lyra-plc-lcd.bin",
+ * built by the lyra-plc-lcd-firmware recipe). The ST7789V's RAM is 240x320,
+ * the glass is the middle 170 columns, so the panel starts at column 35 --
+ * expressed as hback-porch, which is how panel-mipi-dbi takes offsets.
+ */
+&spi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&rm_io1_spi0_clk &rm_io4_spi0_mosi &rm_io3_spi0_csn0>;
+	status = "okay";
+
+	display@0 {
+		compatible = "luckfox,lyra-plc-lcd", "panel-mipi-dbi-spi";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		dc-gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_HIGH>;
+		/*
+		 * GPIO_ACTIVE_HIGH on purpose: the MIPI DBI helpers drive "reset"
+		 * as 1 = run (mipi_dbi_hw_reset() pulses 0 then leaves it at 1),
+		 * so the flag must make logical 1 the panel's physical high. With
+		 * GPIO_ACTIVE_LOW the pin sat low, RESX held the panel in reset,
+		 * and the screen stayed dark while SPI traffic flowed normally.
+		 */
+		reset-gpios = <&gpio0 RK_PA0 GPIO_ACTIVE_HIGH>;
+		backlight = <&backlight>;
+		width-mm = <22>;
+		height-mm = <43>;
+
+		panel-timing {
+			hactive = <170>;
+			vactive = <320>;
+			hback-porch = <35>;
+			vback-porch = <0>;
+			clock-frequency = <0>;
+			hfront-porch = <0>;
+			hsync-len = <0>;
+			vfront-porch = <0>;
+			vsync-len = <0>;
+		};
+	};
+};
+
+/* Touch controller for the LCD. */
+&i2c1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&rm_io9_i2c1_scl &rm_io8_i2c1_sda>;
+	status = "okay";
+
+	touchscreen@15 {
+		compatible = "hynitron,cst816s";
+		reg = <0x15>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PA7 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&gpio0 RK_PA6 GPIO_ACTIVE_LOW>;
+		touchscreen-size-x = <170>;
+		touchscreen-size-y = <320>;
+	};
+};
+
+/*
+ * Luckfox enables I2C0 on the header's "GPIO" pair (gpio1 D2/D3) with nothing
+ * on it; it stays off. Note those pins have ~3.2 kOhm pull-ups on the board.
+ */
+&i2c0 {
+	status = "disabled";
+};
+
+/*
+ * The Cortex-M0 stays off on the PLC: the Lyra Pi's demo firmware drives
+ * gpio0_A2, which is the LCD's D/C line here. Firmware for this board enables
+ * the node and gives it the clocks and pins of the peripherals it drives (see
+ * the mcu node in rk3506-luckfox-lyra-ultra.dtsi).
+ */
+&mcu_rproc {
+	status = "disabled";
+};
+
+/*
+ * Hardware watchdog. systemd arms it (RuntimeWatchdogSec, RebootWatchdogSec),
+ * so a hung system -- or a reboot that stalls on the way down, which has
+ * happened -- resets itself instead of waiting for someone to cut the power.
+ * The kernel's own restart goes through the same CRU global reset.
+ */
+&wdt0 {
+	status = "okay";
+};
+
+/* RTC + temperature/humidity; also on the expansion I2C header. */
+&i2c2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&rm_io28_i2c2_scl &rm_io29_i2c2_sda>;
+	status = "okay";
+
+	/* TCS8563: register-compatible PCF8563 clone. */
+	rtc: rtc@51 {
+		compatible = "nxp,pcf8563";
+		reg = <0x51>;
+		#clock-cells = <0>;
+	};
+
+	humidity-sensor@70 {
+		compatible = "sensirion,shtc3";
+		reg = <0x70>;
+	};
+};
+
+/**********pinctrl**********/
+&pinctrl {
+	ethernet {
+		rmii0_rstn: rmii0-rstn {
+			rockchip,pins = <1 RK_PC0 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		rmii1_rstn: rmii1-rstn {
+			rockchip,pins = <1 RK_PC1 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+};

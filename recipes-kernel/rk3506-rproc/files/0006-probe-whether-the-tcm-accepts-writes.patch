@@ -1,0 +1,75 @@
+From: firepinn <4785534+firepinn@users.noreply.github.com>
+Subject: [PATCH] rk3506_rproc: probe whether the TCM accepts writes before loading
+Upstream-Status: Pending
+
+Loading a new ELF appears to succeed -- rproc_elf_load_segments() returns 0,
+remoteproc logs "Booting fw image", the core restarts -- and the firmware that
+comes up can still be the previous one, because a write-ignored window returns
+no error. Nothing in the load path would say so.
+
+Probe it instead: one word written and read back, with the original restored,
+while the core is stopped. The log then says whether a load can mean anything
+on this part, rather than leaving it to be deduced from firmware behaviour.
+
+diff --git a/rk3506_rproc.c b/rk3506_rproc.c
+index 57eb6e7..58c27c8 100644
+--- a/rk3506_rproc.c
++++ b/rk3506_rproc.c
+@@ -400,6 +400,47 @@ static void * my_da_to_va(struct rproc * rproc, u64 da, size_t len, bool * is_io
+  * the SRAM back, or running the M0 from DDR instead of TCM (see
+  * docs/CORTEX-M0.md).
+  */
++/*
++ * Does the A7 still own this SRAM?
++ *
++ * Write one word, read it back, put the original back. The core is stopped on
++ * every path that reaches the loader, so the image cannot notice. Returns true
++ * if the window accepted the write.
++ *
++ * This exists because a write-ignored window reports nothing: the load returns
++ * 0, remoteproc logs "Booting fw image", the core restarts, and the previous
++ * firmware comes up. Guessing about that cost a debugging session -- a stale
++ * object file had the firmware reporting an old version number, which looks
++ * exactly like an image that failed to load, and sent the investigation after
++ * the TCM mapping instead of after the build. One line in the log settles it.
++ */
++static bool rk3506_tcm_accepts_writes(struct rproc * rproc)
++{
++  rk3506_mcu_t *  mcu = rproc->priv;
++  u32             saved, probe, readback;
++
++  if (!mcu->tcm_virt)
++    return false;
++
++  saved = readl(mcu->tcm_virt);
++  probe = ~saved;
++
++  writel(probe, mcu->tcm_virt);
++  readback = readl(mcu->tcm_virt);
++  writel(saved, mcu->tcm_virt);
++
++  if (readback != probe)
++  {
++    dev_warn(&rproc->dev,
++             "TCM does not accept writes (wrote 0x%08x, read back 0x%08x): "
++             "the resident image will keep running whatever is loaded",
++             probe, readback);
++    return false;
++  }
++
++  return true;
++}
++
+ static int rk3506_rproc_load_once(struct rproc * rproc, const struct firmware * fw)
+ {
+   rk3506_mcu_t *  mcu = rproc->priv;
+@@ -412,6 +453,9 @@ static int rk3506_rproc_load_once(struct rproc * rproc, const struct firmware *
+     return 0;
+   }
+ 
++  dev_info(&rproc->dev, "TCM window is %s",
++           rk3506_tcm_accepts_writes(rproc) ? "writable" : "NOT writable");
++
+   ret = rproc_elf_load_segments(rproc, fw);
+   if (!ret)
+     mcu->fw_resident = true;
