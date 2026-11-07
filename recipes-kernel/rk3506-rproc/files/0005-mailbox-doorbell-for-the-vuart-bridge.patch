@@ -27,11 +27,17 @@ warning and the bridge falls back to sweeping -- an M0 that cannot ring is
 still an M0 that works. On unload the interrupt is masked before the mapping is
 released, so a late interrupt cannot reach an ISR whose registers are gone.
 
+The ISR notifies through the attribute's kernfs node, looked up once at
+probe: sysfs_notify() takes the kernfs rwsem, which sleeps, and in hard IRQ
+context that re-enabled interrupts and could hang the board while sysfs was
+busy elsewhere (a USB device going away, for one). The interrupt is freed
+in remove, before the registers are unmapped.
+
 Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
 ---
 --- a/rk3506_rproc.c
 +++ b/rk3506_rproc.c
-@@ -37,6 +37,7 @@
+@@ -37,6 +37,7 @@ Device-tree block:
  #include <linux/clk.h>
  #include <linux/reset.h>
  #include <linux/elf.h>
@@ -39,7 +45,7 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
  
  int rproc_elf_sanity_check(struct rproc *rproc, const struct firmware *fw);
  u64 rproc_elf_get_boot_addr(struct rproc * rproc, const struct firmware * fw);
-@@ -90,6 +91,53 @@
+@@ -90,6 +91,53 @@ struct resource_table *rproc_elf_find_loaded_rsc_table(struct rproc * rproc, con
    #define RK3506_MCU_TCM_SIZE                     0x4000
  #endif
  
@@ -93,7 +99,7 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
  #define RK3506_MCU_SHMEM_ADDR               0x03C00000
  #define RK3506_MCU_SHMEM_SIZE                 0x100000
  
-@@ -148,6 +196,8 @@
+@@ -149,6 +197,8 @@ typedef struct
    struct reset_control *    rst_h_m0;
    struct reset_control *    rst_m0_jtag;
    struct reset_control *    rst_hresetn_m0_ac;
@@ -102,7 +108,7 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
  
    uint8_t *                 tcm_virt;
    phys_addr_t               tcm_phys;
-@@ -158,6 +208,10 @@
+@@ -159,6 +209,11 @@ typedef struct
    uint8_t *                 regs_GRF;  // FF288
  
    uint8_t *                 shmem_virt;  // 0x03C00000
@@ -110,10 +116,11 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
 +
 +  int                       mbox_irq;
 +  atomic_t                  vuart_events;  // bumped per doorbell
++  struct kernfs_node *      vuart_kn;      // vuart_event, for the ISR
  
    // Set once the ELF has been written into the TCM. See
    // rk3506_rproc_load_once() for why a second write must be avoided.
-@@ -395,6 +449,89 @@
+@@ -396,6 +451,98 @@ static const char * rk3506_rproc_get_firmware(struct platform_device * pdev)
  	return fw_name;
  }
  
@@ -143,8 +150,17 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
 +  writel(status & RK3506_MBOX_STATUS_MASK,
 +         mcu->regs_MBOX + RK3506_MBOX_B2A_STATUS);
 +
++  /*
++   * Not sysfs_notify(): it looks the attribute up by name under the kernfs
++   * rwsem, which sleeps. In hard IRQ context that re-enabled interrupts and
++   * slept whenever something else held the rwsem (any sysfs teardown, such as
++   * a USB device going away) -- a kernel WARNING at best, a hung board at
++   * worst. The node is looked up once at probe; sysfs_notify_dirent() only
++   * queues the wakeup and is safe here.
++   */
 +  atomic_inc(&mcu->vuart_events);
-+  sysfs_notify(&pdev->dev.kobj, NULL, "vuart_event");
++  if (mcu->vuart_kn)
++    sysfs_notify_dirent(mcu->vuart_kn);
 +
 +  return IRQ_HANDLED;
 +}
@@ -203,7 +219,7 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
  /*
   * m0_status: the firmware's heartbeat, in one line.
   *
-@@ -498,6 +635,10 @@
+@@ -501,6 +648,10 @@ static int rk3506_rproc_probe(struct platform_device * pdev)
      rproc_free(rproc);
      return PTR_ERR(mcu->tcm_virt);
    }
@@ -214,7 +230,7 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
    mcu->shmem_virt = ioremap(RK3506_MCU_SHMEM_ADDR, RK3506_MCU_SHMEM_SIZE);
  
    // make the PMU accessible for this module
-@@ -577,6 +718,82 @@
+@@ -580,6 +731,84 @@ static int rk3506_rproc_probe(struct platform_device * pdev)
    if (ret)
      dev_warn(&pdev->dev, "could not create m0_status attribute: %d", ret);
  
@@ -268,6 +284,8 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
 +    ret = device_create_file(&pdev->dev, &dev_attr_vuart_event);
 +    if (ret)
 +      dev_warn(&pdev->dev, "could not create vuart_event attribute: %d", ret);
++    else
++      mcu->vuart_kn = sysfs_get_dirent(pdev->dev.kobj.sd, "vuart_event");
 +
 +    ret = device_create_file(&pdev->dev, &dev_attr_vuart_kick);
 +    if (ret)
@@ -297,7 +315,7 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
    return 0;
  }
  
-@@ -602,6 +819,18 @@
+@@ -605,6 +834,26 @@ static int rk3506_rproc_remove(struct platform_device * pdev)
    struct rproc *   rproc = platform_get_drvdata(pdev);
    rk3506_mcu_t *   mcu = rproc->priv;
  
@@ -309,6 +327,14 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
 +
 +  if (mcu->mbox_irq)
 +  {
++    /* Here, not in the devm cleanup that runs after this function has
++     * unmapped the registers: free_irq() waits for a running ISR, so none can
++     * touch vuart_kn or the mapping afterwards.
++     */
++    devm_free_irq(&pdev->dev, mcu->mbox_irq, pdev);
++    if (mcu->vuart_kn)
++      sysfs_put(mcu->vuart_kn);
++    mcu->vuart_kn = NULL;
 +    device_remove_file(&pdev->dev, &dev_attr_vuart_kick);
 +    device_remove_file(&pdev->dev, &dev_attr_vuart_event);
 +  }
@@ -316,7 +342,7 @@ Signed-off-by: firepinn <4785534+firepinn@users.noreply.github.com>
    device_remove_file(&pdev->dev, &dev_attr_m0_status);
  
    /*
-@@ -627,6 +856,7 @@
+@@ -630,6 +879,7 @@ static int rk3506_rproc_remove(struct platform_device * pdev)
  
    if (mcu->tcm_virt)    iounmap(mcu->tcm_virt);
    if (mcu->shmem_virt)  iounmap(mcu->shmem_virt);
